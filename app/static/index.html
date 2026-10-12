@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#171c4c"><title>Stock Watch · Myntra</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono&family=Instrument+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div id="toast"></div>
+  <main id="login-view" class="login-view">
+    <section class="login-copy"><div class="brand-mark">M</div><p class="eyebrow">MYNTRA · INVENTORY INTELLIGENCE</p><h1>Never lose a sale<br>to an empty size.</h1><p class="lede">Live, size-level stock signals for the fashion catalogue your customers browse every day.</p><div class="signal-preview"><span class="pulse"></span> Live inventory signal</div></section>
+    <section class="login-panel"><form id="login-form"><p class="eyebrow">SECURE ACCESS</p><h2>Welcome back</h2><p class="muted">Sign in to your Stock Watch workspace.</p><label>Email<input id="email" type="email" value="admin@example.com" autocomplete="email" required></label><label>Password<input id="password" type="password" value="change-me-before-production" autocomplete="current-password" required></label><button class="btn primary wide" type="submit">Sign in <span>→</span></button><p id="login-error" class="form-error"></p><p class="help">Local demo credentials are pre-filled. Change them in your environment settings before going live.</p></form></section>
+  </main>
+  <div id="app-view" class="app hidden">
+    <aside class="sidebar"><a class="logo" href="#"><span class="logo-mark">M</span><span>Stock Watch<small>MYNTRA</small></span></a><nav><button class="nav-item active" data-page="overview"><i>◈</i> Overview</button><button class="nav-item" data-page="catalogue"><i>▦</i> Catalogue</button><button class="nav-item" data-page="alerts"><i>⌁</i> Alerts <b id="nav-alert-count">0</b></button></nav><div class="sidebar-bottom"><button id="upload-open" class="import-link">↑ Import inventory</button><button id="signout" class="account"><span>AM</span><strong>Inventory manager<small>Sign out</small></strong></button></div></aside>
+    <section class="content"><header><button id="menu-toggle" class="menu">☰</button><div><p id="page-kicker" class="eyebrow">OPERATIONS / LIVE</p><h1 id="page-title">Good morning, Anika.</h1></div><div class="header-actions"><span class="live-label"><i></i> Live</span><button id="header-import" class="btn secondary">Import <span>↑</span></button><button class="bell" id="show-alerts" aria-label="Alerts">⌁<b id="bell-count">0</b></button></div></header>
+      <div id="overview-page" class="page">
+        <section id="metrics" class="metrics"></section>
+        <section class="split-grid"><div class="panel"><div class="section-head"><div><p class="eyebrow">PRIORITY QUEUE</p><h2>Needs attention</h2></div><button class="text-button" data-go="alerts">View all →</button></div><div id="priority-alerts" class="alert-list"></div></div><div class="panel stock-health"><div class="section-head"><div><p class="eyebrow">CATALOGUE HEALTH</p><h2>Size availability</h2></div></div><div id="health-chart"></div><div class="health-key"><span><i class="key healthy"></i> Healthy</span><span><i class="key low"></i> Low</span><span><i class="key critical"></i> Critical / out</span></div></div></section>
+        <section class="panel"><div class="section-head"><div><p class="eyebrow">PRODUCT WATCHLIST</p><h2>Latest stock movement</h2></div><button class="text-button" data-go="catalogue">Open catalogue →</button></div><div class="table-wrap"><table><thead><tr><th>PRODUCT</th><th>SKU</th><th>SIZE RUN</th><th>TOTAL</th><th>STATUS</th></tr></thead><tbody id="watchlist"></tbody></table></div></section>
+      </div>
+      <div id="catalogue-page" class="page hidden"><div class="toolbar"><div class="search"><span>⌕</span><input id="product-search" placeholder="Search product, SKU, category"></div><div class="filters"><button class="filter active" data-status="all">All</button><button class="filter" data-status="healthy">Healthy</button><button class="filter" data-status="low">Low</button><button class="filter" data-status="critical">Critical</button><button class="filter" data-status="out">Out</button></div></div><div id="product-grid" class="product-grid"></div></div>
+      <div id="alerts-page" class="page hidden"><div class="panel"><div class="section-head"><div><p class="eyebrow">LIVE NOTIFICATIONS</p><h2>Stock alerts</h2></div><div class="filters compact"><button class="filter active" data-alert-status="open">Open</button><button class="filter" data-alert-status="acknowledged">Acknowledged</button><button class="filter" data-alert-status="resolved">Resolved</button></div></div><div id="all-alerts" class="alert-list full"></div></div></div>
+    </section>
+  </div>
+  <dialog id="import-dialog"><form id="import-form" method="dialog"><button type="button" class="close" data-close>×</button><p class="eyebrow">SYNC INVENTORY</p><h2>Import stock CSV</h2><p class="muted">Upload the latest WMS, ERP or approved marketplace export. Existing SKU + size combinations update automatically.</p><label class="dropzone"><input id="csv-file" type="file" accept=".csv" required><span>↑</span><strong>Choose a CSV file</strong><small>Required columns: sku, name, category, size, quantity, reorder_point</small></label><p id="file-name" class="file-name"></p><button class="btn primary wide" type="submit">Update inventory</button><p id="import-result" class="form-error"></p><a class="sample" href="data:text/csv;charset=utf-8,sku,name,category,size,quantity,reorder_point%0AMTR-KRT-1056,Indigo%20Blockprint%20Kurta,Women%20%C2%B7%20Kurtas,M,3,5" download="inventory-template.csv">Download sample CSV</a></form></dialog>
+  <dialog id="product-dialog"><button class="close" data-close>×</button><div id="product-detail"></div></dialog>
+  <script src="/static/app.js"></script>
+</body></html>
