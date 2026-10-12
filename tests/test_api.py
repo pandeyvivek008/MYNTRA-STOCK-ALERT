@@ -33,3 +33,14 @@ def test_csv_import_creates_product_and_alert():
         assert imported.status_code == 200
         assert imported.json()["imported"] == 1
         assert imported.json()["new_alerts"] >= 1
+
+def test_marketplace_order_reduces_colour_size_stock_once():
+    with TestClient(app) as client:
+        headers = {"X-Integration-Secret": "dev-webhook-secret-change-before-production"}
+        payload = {"order_id": f"ORDER-{uuid4().hex}", "items":[{"sku":"MTR-KRT-1056","color":"Indigo","size":"M","quantity":2}]}
+        processed = client.post("/api/integrations/myntra/orders", headers=headers, json=payload)
+        assert processed.status_code == 200
+        assert processed.json()["status"] == "processed"
+        assert processed.json()["reductions"][0]["quantity"] == 5
+        repeated = client.post("/api/integrations/myntra/orders", headers=headers, json=payload)
+        assert repeated.json()["status"] == "already_processed"

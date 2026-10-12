@@ -6,6 +6,15 @@ class Settings(BaseSettings):
     admin_email: str = "admin@example.com"
     admin_password: str = "change-me-before-production"
     allowed_origins: str = "*"
+    integration_webhook_secret: str = "dev-webhook-secret-change-before-production"
+    myntra_api_base_url: str = ""
+    myntra_api_token: str = ""
+    whatsapp_access_token: str = ""
+    whatsapp_phone_number_id: str = ""
+    whatsapp_alert_to: str = ""
+    whatsapp_template_name: str = "stock_alert"
+    whatsapp_template_language: str = "en_US"
+    whatsapp_api_version: str = "v22.0"
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 
 settings = Settings()

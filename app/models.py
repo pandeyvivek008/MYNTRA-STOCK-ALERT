@@ -20,6 +20,7 @@ class Variant(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
     size: Mapped[str] = mapped_column(String(20))
+    color: Mapped[str] = mapped_column(String(60), default="Default")
     quantity: Mapped[int] = mapped_column(Integer, default=0)
     reorder_point: Mapped[int] = mapped_column(Integer, default=5)
     product: Mapped[Product] = relationship(back_populates="variants")
@@ -35,3 +36,10 @@ class Alert(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     product: Mapped[Product] = relationship()
     variant: Mapped[Variant] = relationship()
+
+class ProcessedOrder(Base):
+    __tablename__ = "processed_orders"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    external_order_id: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    source: Mapped[str] = mapped_column(String(40), default="myntra")
+    processed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)

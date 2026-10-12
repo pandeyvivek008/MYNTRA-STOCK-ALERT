@@ -7,11 +7,12 @@ from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Upload
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, inspect, or_, select, text
 from sqlalchemy.orm import Session, joinedload
 from .database import Base, SessionLocal, engine, get_db
 from .live import hub
-from .models import Alert, Product, Variant
+from .models import Alert, ProcessedOrder, Product, Variant
+from .notifications import send_whatsapp_stock_alert
 from .security import create_token, verify_token
 from .settings import settings
 
@@ -28,10 +29,10 @@ def product_json(p: Product):
     stock = sum(v.quantity for v in variants)
     states = [variant_state(v) for v in variants]
     status = "out" if stock == 0 else "critical" if "critical" in states or "out" in states else "low" if "low" in states else "healthy"
-    return {"id":p.id,"sku":p.sku,"name":p.name,"category":p.category,"image_url":p.image_url,"updated_at":p.updated_at.isoformat() if p.updated_at else None,"total_stock":stock,"status":status,"variants":[{"id":v.id,"size":v.size,"quantity":v.quantity,"reorder_point":v.reorder_point,"state":variant_state(v)} for v in variants]}
+    return {"id":p.id,"sku":p.sku,"name":p.name,"category":p.category,"image_url":p.image_url,"updated_at":p.updated_at.isoformat() if p.updated_at else None,"total_stock":stock,"status":status,"variants":[{"id":v.id,"size":v.size,"color":v.color,"quantity":v.quantity,"reorder_point":v.reorder_point,"state":variant_state(v)} for v in variants]}
 
 def alert_json(a: Alert):
-    return {"id":a.id,"severity":a.severity,"status":a.status,"message":a.message,"created_at":a.created_at.isoformat(),"product":{"id":a.product.id,"sku":a.product.sku,"name":a.product.name},"variant":{"id":a.variant.id,"size":a.variant.size,"quantity":a.variant.quantity}}
+    return {"id":a.id,"severity":a.severity,"status":a.status,"message":a.message,"created_at":a.created_at.isoformat(),"product":{"id":a.product.id,"sku":a.product.sku,"name":a.product.name},"variant":{"id":a.variant.id,"size":a.variant.size,"color":a.variant.color,"quantity":a.variant.quantity}}
 
 def auth_user(authorization: Annotated[str | None, Header()] = None):
     if not authorization or not authorization.lower().startswith("bearer "): raise HTTPException(401, "Sign in required")
@@ -43,7 +44,7 @@ def issue_alert_if_needed(db: Session, product: Product, variant: Variant):
     existing = db.scalar(select(Alert).where(Alert.variant_id == variant.id, Alert.status.in_(["open", "acknowledged"])))
     if existing: return None
     severity = "out_of_stock" if state == "out" else "critical" if state == "critical" else "low"
-    alert = Alert(product_id=product.id, variant_id=variant.id, severity=severity, message=f"{product.name} · {variant.size} has {variant.quantity} units left (reorder point: {variant.reorder_point}).")
+    alert = Alert(product_id=product.id, variant_id=variant.id, severity=severity, message=f"{product.name} · {variant.color} · {variant.size} has {variant.quantity} units left (reorder point: {variant.reorder_point}).")
     db.add(alert); db.flush()
     return alert
 
@@ -60,12 +61,18 @@ def seed(db: Session):
     for sku, name, category, levels in records:
         p = Product(sku=sku, name=name, category=category); db.add(p); db.flush()
         for size, quantity in zip(["S", "M", "L", "XL", "XXL"], levels):
-            v = Variant(product_id=p.id, size=size, quantity=quantity, reorder_point=5); db.add(v); db.flush(); issue_alert_if_needed(db,p,v)
+            v = Variant(product_id=p.id, size=size, color="Indigo", quantity=quantity, reorder_point=5); db.add(v); db.flush(); issue_alert_if_needed(db,p,v)
     db.commit()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(engine)
+    # Small compatibility migration for local databases created before colour tracking.
+    if "variants" in inspect(engine).get_table_names():
+        columns = {c["name"] for c in inspect(engine).get_columns("variants")}
+        if "color" not in columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE variants ADD COLUMN color VARCHAR(60) DEFAULT 'Default'"))
     with SessionLocal() as db: seed(db)
     yield
 
@@ -134,17 +141,60 @@ async def import_inventory(file: UploadFile = File(...), _: str = Depends(auth_u
         if not p:
             p=Product(sku=row["sku"].strip(),name=row["name"].strip(),category=row["category"].strip()); db.add(p); db.flush()
         else: p.name=row["name"].strip() or p.name; p.category=row["category"].strip() or p.category
-        v = db.scalar(select(Variant).where(Variant.product_id==p.id,Variant.size==row["size"].strip().upper()))
-        if not v: v=Variant(product_id=p.id,size=row["size"].strip().upper(),quantity=quantity,reorder_point=point); db.add(v); db.flush()
+        color = row.get("color", "Default").strip() or "Default"
+        v = db.scalar(select(Variant).where(Variant.product_id==p.id,Variant.size==row["size"].strip().upper(),Variant.color==color))
+        if not v: v=Variant(product_id=p.id,size=row["size"].strip().upper(),color=color,quantity=quantity,reorder_point=point); db.add(v); db.flush()
         else: v.quantity=quantity; v.reorder_point=point
-        db.flush(); changed.append({"sku":p.sku,"size":v.size,"quantity":v.quantity,"state":variant_state(v)})
+        db.flush(); changed.append({"sku":p.sku,"size":v.size,"color":v.color,"quantity":v.quantity,"state":variant_state(v)})
         alert=issue_alert_if_needed(db,p,v)
         if alert: created_alerts.append(alert)
     db.commit()
     for alert in created_alerts:
-        db.refresh(alert, attribute_names=["product","variant"]); await hub.broadcast({"type":"alert_created","alert":alert_json(alert)})
+        db.refresh(alert, attribute_names=["product","variant"])
+        alert_data = alert_json(alert)
+        await hub.broadcast({"type":"alert_created","alert":alert_data})
+        await send_whatsapp_stock_alert(alert_data)
     await hub.broadcast({"type":"inventory_imported","rows":len(rows),"changed":changed})
     return {"imported":len(rows),"new_alerts":len(created_alerts),"changed":changed}
+
+@app.post("/api/integrations/myntra/orders")
+async def receive_myntra_order(body: dict, x_integration_secret: Annotated[str | None, Header()] = None, db: Session = Depends(get_db)):
+    """Receive normalized orders from an approved Myntra Seller API connector.
+
+    Expected JSON: {"order_id":"...", "items":[{"sku":"...","size":"M","color":"Indigo","quantity":1}]}
+    Repeated order IDs are safe: no stock is reduced twice.
+    """
+    if not x_integration_secret or x_integration_secret != settings.integration_webhook_secret:
+        raise HTTPException(401, "Invalid integration secret")
+    order_id = str(body.get("order_id", "")).strip()
+    items = body.get("items")
+    if not order_id or not isinstance(items, list) or not items:
+        raise HTTPException(422, "order_id and a non-empty items list are required")
+    if db.scalar(select(ProcessedOrder).where(ProcessedOrder.external_order_id == order_id)):
+        return {"status":"already_processed", "order_id":order_id}
+    reductions, alerts = [], []
+    for item in items:
+        sku, size = str(item.get("sku", "")).strip(), str(item.get("size", "")).strip().upper()
+        color = str(item.get("color", "Default")).strip() or "Default"
+        try: quantity = int(item.get("quantity", 0))
+        except (TypeError, ValueError): raise HTTPException(422, f"Invalid quantity for {sku}")
+        if not sku or not size or quantity <= 0: raise HTTPException(422, "Every item needs sku, size and a positive quantity")
+        variant = db.scalar(select(Variant).join(Product).where(Product.sku==sku, Variant.size==size, Variant.color==color))
+        if not variant:
+            raise HTTPException(404, f"Variant not found: {sku} / {color} / {size}")
+        variant.quantity = max(0, variant.quantity - quantity)
+        db.flush(); reductions.append({"sku":sku,"size":size,"color":color,"quantity":variant.quantity,"state":variant_state(variant)})
+        alert = issue_alert_if_needed(db, variant.product, variant)
+        if alert: alerts.append(alert)
+    db.add(ProcessedOrder(external_order_id=order_id, source="myntra")); db.commit()
+    alert_payloads = []
+    for alert in alerts:
+        db.refresh(alert, attribute_names=["product","variant"])
+        data = alert_json(alert); alert_payloads.append(data)
+        await hub.broadcast({"type":"alert_created","alert":data})
+        await send_whatsapp_stock_alert(data)
+    await hub.broadcast({"type":"order_processed","order_id":order_id,"reductions":reductions})
+    return {"status":"processed","order_id":order_id,"reductions":reductions,"alerts_created":len(alert_payloads)}
 
 @app.websocket("/ws/alerts")
 async def alerts_socket(websocket: WebSocket, token: str = Query(...)):
