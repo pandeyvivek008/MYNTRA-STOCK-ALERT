@@ -1,5 +1,6 @@
 import csv
 import io
+import httpx
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Annotated
@@ -193,6 +194,22 @@ async def process_marketplace_order(channel: str, body: dict, db: Session):
     await hub.broadcast({"type":"order_processed","channel":channel,"order_id":order_id,"reductions":reductions})
     return {"status":"processed","channel":channel,"order_id":order_id,"reductions":reductions,"alerts_created":len(alert_payloads)}
 
+async def enrich_disha_answer(question: str, grounded_answer: str) -> str:
+    """Use Gemini only to phrase a database-grounded answer; it never gets write access."""
+    if not settings.gemini_api_key:
+        return grounded_answer
+    prompt = ("You are Disha, a concise Hindi-English inventory assistant. Answer using ONLY the verified stock "
+              f"context below. Do not invent quantities, products, API status, or actions.\n\nVerified context: {grounded_answer}\n\nUser question: {question}")
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_model}:generateContent"
+        payload = {"contents":[{"parts":[{"text":prompt}]}],"generationConfig":{"temperature":0.15,"maxOutputTokens":180}}
+        async with httpx.AsyncClient(timeout=12) as client:
+            response = await client.post(url, headers={"x-goog-api-key":settings.gemini_api_key}, json=payload)
+            response.raise_for_status()
+        return response.json()["candidates"][0]["content"]["parts"][0]["text"].strip() or grounded_answer
+    except (httpx.HTTPError, KeyError, IndexError, TypeError):
+        return grounded_answer
+
 @app.post("/api/integrations/{channel}/orders")
 async def receive_marketplace_order(channel: str, body: dict, x_integration_secret: Annotated[str | None, Header()] = None, db: Session = Depends(get_db)):
     """Webhook target for approved marketplace API adapters.
@@ -221,7 +238,7 @@ def channels(_: str = Depends(auth_user), db: Session = Depends(get_db)):
     return result
 
 @app.post("/api/disha/query")
-def disha_query(body: dict, _: str = Depends(auth_user), db: Session = Depends(get_db)):
+async def disha_query(body: dict, _: str = Depends(auth_user), db: Session = Depends(get_db)):
     """Grounded inventory assistant: answers only from the live Stock Watch database."""
     query = str(body.get("query", "")).strip().lower()
     if not query: raise HTTPException(422, "A question is required")
@@ -236,21 +253,24 @@ def disha_query(body: dict, _: str = Depends(auth_user), db: Session = Depends(g
         names = [f"{v.product.name} — {v.color}, {v.size}: {v.quantity}" for v in affected[:5]]
         scope = channel.title() if channel else "all channels"
         answer = f"{scope}: {len(affected)} low or critical size variants. " + ("Top priority: " + "; ".join(names) if names else "Everything is above its reorder point.")
-        return {"answer":answer,"action":"alerts","count":len(affected)}
+        return {"answer":await enrich_disha_answer(query, answer),"action":"alerts","count":len(affected)}
     if any(word in query for word in ("order", "today", "sale")):
         rows = db.scalars(select(ProcessedOrder).order_by(ProcessedOrder.processed_at.desc()).limit(100)).all()
         if channel: rows = [r for r in rows if r.source==channel]
         scope = channel.title() if channel else "all marketplaces"
-        return {"answer":f"Stock Watch has processed {len(rows)} recent orders for {scope}. Order-level sales totals require live marketplace credentials and webhook traffic.","action":"channels","count":len(rows)}
+        answer=f"Stock Watch has processed {len(rows)} recent orders for {scope}. Order-level sales totals require live marketplace credentials and webhook traffic."
+        return {"answer":await enrich_disha_answer(query, answer),"action":"channels","count":len(rows)}
     if any(word in query for word in ("channel", "marketplace", "connect", "myntra", "amazon", "flipkart", "ajio", "nykaa", "snapdeal")):
         rows = []
         for name in sorted(MARKETPLACES):
             count = db.scalar(select(func.count(MarketplaceListing.id)).where(MarketplaceListing.channel==name))
             rows.append(f"{name.title()}: {count} SKU mappings")
-        return {"answer":"Channel status — " + "; ".join(rows) + ". Add approved seller credentials in Railway to begin real-time sync.","action":"channels"}
+        answer="Channel status — " + "; ".join(rows) + ". Add approved seller credentials in Railway to begin real-time sync."
+        return {"answer":await enrich_disha_answer(query, answer),"action":"channels"}
     products = db.scalars(select(Product).options(joinedload(Product.variants))).unique().all()
     units = sum(v.quantity for p in products for v in p.variants)
-    return {"answer":f"You have {len(products)} products and {units} units in Stock Watch. Ask me about critical alerts, marketplace channels, or recent orders.","action":"overview"}
+    answer=f"You have {len(products)} products and {units} units in Stock Watch. Ask me about critical alerts, marketplace channels, or recent orders."
+    return {"answer":await enrich_disha_answer(query, answer),"action":"overview"}
 
 @app.post("/api/channels/{channel}/listings")
 def map_channel_sku(channel: str, body: dict, _: str = Depends(auth_user), db: Session = Depends(get_db)):

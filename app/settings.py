@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     ajio_api_token: str = ""
     nykaa_api_token: str = ""
     snapdeal_api_token: str = ""
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-3.5-flash"
     whatsapp_access_token: str = ""
     whatsapp_phone_number_id: str = ""
     whatsapp_alert_to: str = ""
