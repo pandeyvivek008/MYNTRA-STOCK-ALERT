@@ -44,3 +44,13 @@ def test_marketplace_order_reduces_colour_size_stock_once():
         assert processed.json()["reductions"][0]["quantity"] == 5
         repeated = client.post("/api/integrations/myntra/orders", headers=headers, json=payload)
         assert repeated.json()["status"] == "already_processed"
+
+def test_channels_and_unified_marketplace_endpoint():
+    with TestClient(app) as client:
+        headers = login(client)
+        channels = client.get("/api/channels", headers=headers).json()
+        assert {x["name"] for x in channels} == {"myntra","amazon","flipkart","ajio","nykaa","snapdeal"}
+        payload = {"order_id": f"AMZ-{uuid4().hex}", "items":[{"sku":"MTR-TEE-1042","color":"Indigo","size":"S","quantity":1}]}
+        result = client.post("/api/integrations/amazon/orders", headers={"X-Integration-Secret":"dev-webhook-secret-change-before-production"}, json=payload)
+        assert result.status_code == 200
+        assert result.json()["channel"] == "amazon"
