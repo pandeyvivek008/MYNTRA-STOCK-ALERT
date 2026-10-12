@@ -54,3 +54,10 @@ def test_channels_and_unified_marketplace_endpoint():
         result = client.post("/api/integrations/amazon/orders", headers={"X-Integration-Secret":"dev-webhook-secret-change-before-production"}, json=payload)
         assert result.status_code == 200
         assert result.json()["channel"] == "amazon"
+
+def test_disha_answers_from_inventory():
+    with TestClient(app) as client:
+        response = client.post("/api/disha/query", headers=login(client), json={"query":"show critical stock alerts"})
+        assert response.status_code == 200
+        assert response.json()["action"] == "alerts"
+        assert "variants" in response.json()["answer"]

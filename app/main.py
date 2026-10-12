@@ -220,6 +220,38 @@ def channels(_: str = Depends(auth_user), db: Session = Depends(get_db)):
         result.append({"name":name,"configured":configured,"mapped_skus":db.scalar(select(func.count(MarketplaceListing.id)).where(MarketplaceListing.channel==name)),"webhook_path":f"/api/integrations/{name}/orders"})
     return result
 
+@app.post("/api/disha/query")
+def disha_query(body: dict, _: str = Depends(auth_user), db: Session = Depends(get_db)):
+    """Grounded inventory assistant: answers only from the live Stock Watch database."""
+    query = str(body.get("query", "")).strip().lower()
+    if not query: raise HTTPException(422, "A question is required")
+    channel = next((name for name in MARKETPLACES if name in query), None)
+    if any(word in query for word in ("critical", "low", "alert", "out of stock", "out-of-stock")):
+        variants = db.scalars(select(Variant).options(joinedload(Variant.product))).all()
+        affected = [v for v in variants if variant_state(v) in ("low", "critical", "out")]
+        if channel:
+            listing_ids = {x.variant_id for x in db.scalars(select(MarketplaceListing).where(MarketplaceListing.channel==channel, MarketplaceListing.active==1)).all()}
+            affected = [v for v in affected if v.id in listing_ids]
+        affected.sort(key=lambda v: (0 if variant_state(v)=="out" else 1 if variant_state(v)=="critical" else 2, v.quantity))
+        names = [f"{v.product.name} — {v.color}, {v.size}: {v.quantity}" for v in affected[:5]]
+        scope = channel.title() if channel else "all channels"
+        answer = f"{scope}: {len(affected)} low or critical size variants. " + ("Top priority: " + "; ".join(names) if names else "Everything is above its reorder point.")
+        return {"answer":answer,"action":"alerts","count":len(affected)}
+    if any(word in query for word in ("order", "today", "sale")):
+        rows = db.scalars(select(ProcessedOrder).order_by(ProcessedOrder.processed_at.desc()).limit(100)).all()
+        if channel: rows = [r for r in rows if r.source==channel]
+        scope = channel.title() if channel else "all marketplaces"
+        return {"answer":f"Stock Watch has processed {len(rows)} recent orders for {scope}. Order-level sales totals require live marketplace credentials and webhook traffic.","action":"channels","count":len(rows)}
+    if any(word in query for word in ("channel", "marketplace", "connect", "myntra", "amazon", "flipkart", "ajio", "nykaa", "snapdeal")):
+        rows = []
+        for name in sorted(MARKETPLACES):
+            count = db.scalar(select(func.count(MarketplaceListing.id)).where(MarketplaceListing.channel==name))
+            rows.append(f"{name.title()}: {count} SKU mappings")
+        return {"answer":"Channel status — " + "; ".join(rows) + ". Add approved seller credentials in Railway to begin real-time sync.","action":"channels"}
+    products = db.scalars(select(Product).options(joinedload(Product.variants))).unique().all()
+    units = sum(v.quantity for p in products for v in p.variants)
+    return {"answer":f"You have {len(products)} products and {units} units in Stock Watch. Ask me about critical alerts, marketplace channels, or recent orders.","action":"overview"}
+
 @app.post("/api/channels/{channel}/listings")
 def map_channel_sku(channel: str, body: dict, _: str = Depends(auth_user), db: Session = Depends(get_db)):
     channel = channel.lower()
