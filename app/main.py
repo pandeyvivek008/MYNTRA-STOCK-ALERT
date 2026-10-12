@@ -11,7 +11,7 @@ from sqlalchemy import func, inspect, or_, select, text
 from sqlalchemy.orm import Session, joinedload
 from .database import Base, SessionLocal, engine, get_db
 from .live import hub
-from .models import Alert, ProcessedOrder, Product, Variant
+from .models import Alert, MarketplaceListing, ProcessedOrder, Product, Variant
 from .notifications import send_whatsapp_stock_alert
 from .security import create_token, verify_token
 from .settings import settings
@@ -157,44 +157,80 @@ async def import_inventory(file: UploadFile = File(...), _: str = Depends(auth_u
     await hub.broadcast({"type":"inventory_imported","rows":len(rows),"changed":changed})
     return {"imported":len(rows),"new_alerts":len(created_alerts),"changed":changed}
 
-@app.post("/api/integrations/myntra/orders")
-async def receive_myntra_order(body: dict, x_integration_secret: Annotated[str | None, Header()] = None, db: Session = Depends(get_db)):
-    """Receive normalized orders from an approved Myntra Seller API connector.
+MARKETPLACES = {"myntra", "amazon", "flipkart", "ajio", "nykaa", "snapdeal"}
 
-    Expected JSON: {"order_id":"...", "items":[{"sku":"...","size":"M","color":"Indigo","quantity":1}]}
-    Repeated order IDs are safe: no stock is reduced twice.
-    """
-    if not x_integration_secret or x_integration_secret != settings.integration_webhook_secret:
-        raise HTTPException(401, "Invalid integration secret")
+async def process_marketplace_order(channel: str, body: dict, db: Session):
+    """Apply one normalized marketplace order exactly once."""
     order_id = str(body.get("order_id", "")).strip()
     items = body.get("items")
     if not order_id or not isinstance(items, list) or not items:
         raise HTTPException(422, "order_id and a non-empty items list are required")
-    if db.scalar(select(ProcessedOrder).where(ProcessedOrder.external_order_id == order_id)):
+    storage_order_id = f"{channel}:{order_id}"
+    if db.scalar(select(ProcessedOrder).where(ProcessedOrder.external_order_id == storage_order_id)):
         return {"status":"already_processed", "order_id":order_id}
     reductions, alerts = [], []
     for item in items:
-        sku, size = str(item.get("sku", "")).strip(), str(item.get("size", "")).strip().upper()
+        sku, size = str(item.get("sku", item.get("external_sku", ""))).strip(), str(item.get("size", "")).strip().upper()
         color = str(item.get("color", "Default")).strip() or "Default"
         try: quantity = int(item.get("quantity", 0))
         except (TypeError, ValueError): raise HTTPException(422, f"Invalid quantity for {sku}")
         if not sku or not size or quantity <= 0: raise HTTPException(422, "Every item needs sku, size and a positive quantity")
-        variant = db.scalar(select(Variant).join(Product).where(Product.sku==sku, Variant.size==size, Variant.color==color))
+        listing = db.scalar(select(MarketplaceListing).where(MarketplaceListing.channel==channel, MarketplaceListing.external_sku==sku, MarketplaceListing.active==1))
+        variant = listing.variant if listing else db.scalar(select(Variant).join(Product).where(Product.sku==sku, Variant.size==size, Variant.color==color))
         if not variant:
             raise HTTPException(404, f"Variant not found: {sku} / {color} / {size}")
         variant.quantity = max(0, variant.quantity - quantity)
         db.flush(); reductions.append({"sku":sku,"size":size,"color":color,"quantity":variant.quantity,"state":variant_state(variant)})
         alert = issue_alert_if_needed(db, variant.product, variant)
         if alert: alerts.append(alert)
-    db.add(ProcessedOrder(external_order_id=order_id, source="myntra")); db.commit()
+    db.add(ProcessedOrder(external_order_id=storage_order_id, source=channel)); db.commit()
     alert_payloads = []
     for alert in alerts:
         db.refresh(alert, attribute_names=["product","variant"])
         data = alert_json(alert); alert_payloads.append(data)
         await hub.broadcast({"type":"alert_created","alert":data})
         await send_whatsapp_stock_alert(data)
-    await hub.broadcast({"type":"order_processed","order_id":order_id,"reductions":reductions})
-    return {"status":"processed","order_id":order_id,"reductions":reductions,"alerts_created":len(alert_payloads)}
+    await hub.broadcast({"type":"order_processed","channel":channel,"order_id":order_id,"reductions":reductions})
+    return {"status":"processed","channel":channel,"order_id":order_id,"reductions":reductions,"alerts_created":len(alert_payloads)}
+
+@app.post("/api/integrations/{channel}/orders")
+async def receive_marketplace_order(channel: str, body: dict, x_integration_secret: Annotated[str | None, Header()] = None, db: Session = Depends(get_db)):
+    """Webhook target for approved marketplace API adapters.
+
+    Normalized payload: {"order_id":"...", "items":[{"sku":"...","size":"M","color":"Indigo","quantity":1}]}.
+    """
+    channel = channel.lower()
+    if channel not in MARKETPLACES: raise HTTPException(404, "Unsupported marketplace")
+    if not x_integration_secret or x_integration_secret != settings.integration_webhook_secret:
+        raise HTTPException(401, "Invalid integration secret")
+    return await process_marketplace_order(channel, body, db)
+
+@app.post("/api/integrations/myntra/orders")
+async def receive_myntra_order(body: dict, x_integration_secret: Annotated[str | None, Header()] = None, db: Session = Depends(get_db)):
+    """Backward-compatible Myntra endpoint."""
+    if not x_integration_secret or x_integration_secret != settings.integration_webhook_secret:
+        raise HTTPException(401, "Invalid integration secret")
+    return await process_marketplace_order("myntra", body, db)
+
+@app.get("/api/channels")
+def channels(_: str = Depends(auth_user), db: Session = Depends(get_db)):
+    result = []
+    for name in sorted(MARKETPLACES):
+        configured = bool(getattr(settings, f"{name}_api_token", ""))
+        result.append({"name":name,"configured":configured,"mapped_skus":db.scalar(select(func.count(MarketplaceListing.id)).where(MarketplaceListing.channel==name)),"webhook_path":f"/api/integrations/{name}/orders"})
+    return result
+
+@app.post("/api/channels/{channel}/listings")
+def map_channel_sku(channel: str, body: dict, _: str = Depends(auth_user), db: Session = Depends(get_db)):
+    channel = channel.lower()
+    if channel not in MARKETPLACES: raise HTTPException(404, "Unsupported marketplace")
+    external_sku, variant_id = str(body.get("external_sku", "")).strip(), body.get("variant_id")
+    if not external_sku or not isinstance(variant_id, int): raise HTTPException(422,"external_sku and variant_id are required")
+    if not db.get(Variant, variant_id): raise HTTPException(404,"Variant not found")
+    mapping = db.scalar(select(MarketplaceListing).where(MarketplaceListing.channel==channel,MarketplaceListing.external_sku==external_sku))
+    if mapping: mapping.variant_id=variant_id; mapping.active=1
+    else: db.add(MarketplaceListing(channel=channel,external_sku=external_sku,variant_id=variant_id))
+    db.commit(); return {"status":"mapped","channel":channel,"external_sku":external_sku,"variant_id":variant_id}
 
 @app.websocket("/ws/alerts")
 async def alerts_socket(websocket: WebSocket, token: str = Query(...)):

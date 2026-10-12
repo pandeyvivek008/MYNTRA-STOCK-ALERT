@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .database import Base
 
@@ -43,3 +43,13 @@ class ProcessedOrder(Base):
     external_order_id: Mapped[str] = mapped_column(String(120), unique=True, index=True)
     source: Mapped[str] = mapped_column(String(40), default="myntra")
     processed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+class MarketplaceListing(Base):
+    __tablename__ = "marketplace_listings"
+    __table_args__ = (UniqueConstraint("channel", "external_sku", name="uq_channel_external_sku"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    channel: Mapped[str] = mapped_column(String(30), index=True)
+    external_sku: Mapped[str] = mapped_column(String(120), index=True)
+    variant_id: Mapped[int] = mapped_column(ForeignKey("variants.id"), index=True)
+    active: Mapped[int] = mapped_column(Integer, default=1)
+    variant: Mapped[Variant] = relationship()
